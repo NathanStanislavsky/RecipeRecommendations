@@ -1,8 +1,9 @@
 import os
 import pandas as pd
 import numpy as np
+import json
 from dotenv import load_dotenv
-from vercel_kv import KV
+import redis
 from surprise import SVD, Dataset, Reader
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -26,13 +27,18 @@ class Train:
         if not redis_url:
             raise ValueError("FATAL: REDIS_URL not found in environment variables.")
 
-        print("Found REDIS_URL. Connecting to Vercel KV...")
-        self.kv_client = KV.from_url(redis_url)
-        print("Successfully connected to Vercel KV.")
+        print("Found REDIS_URL. Connecting to Redis...")
+        try:
+            self.redis_client = redis.from_url(redis_url)
+            self.redis_client.ping()
+            print("Successfully connected to Redis.")
+        except Exception as e:
+            print(f"FATAL: Could not connect to Redis: {e}")
+            raise
 
     def train_model(self, ratings_df):
         print("--- Training SVD Model ---")
-        reader = Reader()
+        reader = Reader(rating_scale=(1, 5))
         data = Dataset.load_from_df(
             ratings_df[["user_id", "recipe_id", "rating"]], reader
         )
@@ -114,18 +120,22 @@ class Train:
                 k: v.tolist() for k, v in recipe_embeddings.items()
             }
 
-            self.kv_client.set("user_embeddings", user_embeddings_serializable)
+            self.redis_client.set(
+                "user_embeddings", json.dumps(user_embeddings_serializable)
+            )
             print("Successfully saved user_embeddings.")
 
-            self.kv_client.set("recipe_embeddings", recipe_embeddings_serializable)
+            self.redis_client.set(
+                "recipe_embeddings", json.dumps(recipe_embeddings_serializable)
+            )
             print("Successfully saved recipe_embeddings.")
 
-            self.kv_client.set("similar_recipes", similar_recipes)
+            self.redis_client.set("similar_recipes", json.dumps(similar_recipes))
             print("Successfully saved similar_recipes.")
 
-            print("--- All data saved to Vercel KV successfully. ---")
+            print("--- All data saved to Redis successfully. ---")
         except Exception as e:
-            print(f"ERROR: Failed to save data to Vercel KV: {e}")
+            print(f"ERROR: Failed to save data to Redis: {e}")
 
 
 if __name__ == "__main__":
