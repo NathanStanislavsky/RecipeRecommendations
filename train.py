@@ -1,11 +1,9 @@
 import os
-import pandas as pd
-import numpy as np
+import pandas as pd 
 import json
 from dotenv import load_dotenv
 import redis
 from surprise import SVD, Dataset, Reader
-from sklearn.metrics.pairwise import cosine_similarity
 
 from extract import Extract
 
@@ -38,9 +36,32 @@ class Train:
 
     def train_model(self, ratings_df):
         print("--- Training SVD Model ---")
+        
+        # Data validation and cleaning
+        print(f"Original data shape: {ratings_df.shape}")
+        
+        # Remove rows with invalid user_id or recipe_id
+        valid_data = ratings_df.dropna(subset=['user_id', 'recipe_id', 'rating'])
+        print(f"After removing nulls: {valid_data.shape}")
+        
+        # Convert user_id and recipe_id to strings to avoid issues with numeric IDs
+        valid_data['user_id'] = valid_data['user_id'].astype(str)
+        valid_data['recipe_id'] = valid_data['recipe_id'].astype(str)
+        
+        # Remove any empty strings or problematic IDs
+        valid_data = valid_data[
+            (valid_data['user_id'] != '') & 
+            (valid_data['user_id'] != '0') & 
+            (valid_data['user_id'] != 'None') &
+            (valid_data['recipe_id'] != '') & 
+            (valid_data['recipe_id'] != '0') & 
+            (valid_data['recipe_id'] != 'None')
+        ]
+        print(f"After filtering invalid IDs: {valid_data.shape}")
+        
         reader = Reader(rating_scale=(1, 5))
         data = Dataset.load_from_df(
-            ratings_df[["user_id", "recipe_id", "rating"]], reader
+            valid_data[["user_id", "recipe_id", "rating"]], reader
         )
         trainset = data.build_full_trainset()
 
@@ -53,11 +74,32 @@ class Train:
         user_embeddings_raw = algo.pu
         recipe_embeddings_raw = algo.qi
 
+        print(f"Raw user embeddings shape: {user_embeddings_raw.shape}")
+        print(f"Raw recipe embeddings shape: {recipe_embeddings_raw.shape}")
+        print(f"Number of users in trainset: {trainset.n_users}")
+        print(f"Number of items in trainset: {trainset.n_items}")
+
         # Map internal surprise IDs back to application original IDs
-        user_id_map = {trainset.to_inner_uid(uid): uid for uid in trainset.all_users()}
-        recipe_id_map = {
-            trainset.to_inner_iid(iid): iid for iid in trainset.all_items()
-        }
+        user_id_map = {}
+        for inner_uid in range(trainset.n_users):
+            try:
+                original_uid = trainset.to_raw_uid(inner_uid)
+                user_id_map[inner_uid] = original_uid
+            except Exception as e:
+                print(f"Warning: Could not map inner user ID {inner_uid} - {e}")
+                continue
+        
+        recipe_id_map = {}
+        for inner_iid in range(trainset.n_items):
+            try:
+                original_iid = trainset.to_raw_iid(inner_iid)
+                recipe_id_map[inner_iid] = original_iid
+            except Exception as e:
+                print(f"Warning: Could not map inner item ID {inner_iid} - {e}")
+                continue
+
+        print(f"Mapped {len(user_id_map)} users")
+        print(f"Mapped {len(recipe_id_map)} recipes")
 
         user_embeddings = {
             user_id_map[inner_id]: user_embeddings_raw[inner_id]
@@ -72,37 +114,8 @@ class Train:
         print(f"Extracted {len(recipe_embeddings)} recipe embeddings.")
         return user_embeddings, recipe_embeddings
 
-    def calculate_similar_recipes(self, recipe_embeddings, top_n=10):
-        print(f"--- Calculating Top {top_n} Similar Recipes ---")
-
-        # Convert embeddings dict to a list of IDs and a numpy matrix for efficient calculation
-        recipe_ids = list(recipe_embeddings.keys())
-        embedding_matrix = np.array(list(recipe_embeddings.values()))
-
-        # Calculate cosine similarity between all recipes
-        cosine_sim_matrix = cosine_similarity(embedding_matrix)
-
-        similar_recipes_map = {}
-        for i, recipe_id in enumerate(recipe_ids):
-            # Get similarity scores for the current recipe against all others
-            sim_scores = list(enumerate(cosine_sim_matrix[i]))
-
-            # Sort recipes based on similarity score, descending
-            sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-
-            # Get the scores of the top_n+1 most similar recipes (the first one is the recipe itself)
-            top_similar_indices = [score[0] for score in sim_scores[1 : top_n + 1]]
-
-            # Map indices back to actual recipe IDs
-            similar_recipes_map[recipe_id] = [
-                recipe_ids[j] for j in top_similar_indices
-            ]
-
-        print("--- Similarity Calculation Complete ---")
-        return similar_recipes_map
-
-    def save_to_kv(self, user_embeddings, recipe_embeddings, similar_recipes):
-        print("--- Saving Data to Vercel KV ---")
+    def save_to_redis(self, user_embeddings, recipe_embeddings):
+        print("--- Saving Data to Redis ---")
         try:
             internal_user_embeddings = {
                 uid: embed
@@ -130,9 +143,6 @@ class Train:
             )
             print("Successfully saved recipe_embeddings.")
 
-            self.redis_client.set("similar_recipes", json.dumps(similar_recipes))
-            print("Successfully saved similar_recipes.")
-
             print("--- All data saved to Redis successfully. ---")
         except Exception as e:
             print(f"ERROR: Failed to save data to Redis: {e}")
@@ -159,7 +169,6 @@ if __name__ == "__main__":
     trainer = Train()
     algo, trainset = trainer.train_model(ratings_df)
     user_embeds, recipe_embeds = trainer.extract_embeddings(algo, trainset)
-    similar_recipes_map = trainer.calculate_similar_recipes(recipe_embeds)
 
     # 3. Save Data to Production
-    trainer.save_to_kv(user_embeds, recipe_embeds, similar_recipes_map)
+    trainer.save_to_redis(user_embeds, recipe_embeds)
