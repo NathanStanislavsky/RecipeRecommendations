@@ -129,6 +129,27 @@ class Train:
         except Exception as e:
             print(f"ERROR: Failed to upload {filename} to GCS: {e}")
 
+    def save_user_embeddings_individually(self, user_embeddings):
+        print(
+            f"--- Preparing to upload {len(user_embeddings)} individual user embeddings ---"
+        )
+        bucket = self.storage_client.bucket(self.bucket_name)
+
+        for user_id, embedding_array in user_embeddings.items():
+            filename = f"user_embeddings/{user_id}.json"
+            blob = bucket.blob(filename)
+
+            embedding_list = embedding_array
+            json_data = json.dumps(embedding_list)
+
+            try:
+                blob.upload_from_string(json_data, content_type="application/json")
+            except Exception as e:
+                print(f"ERROR: Failed to upload embedding for user {user_id}: {e}")
+                continue
+
+        print("--- Individual user embedding upload complete ---")
+
     def run_pipeline(self, ratings_df):
         algo, trainset = self.train_model(ratings_df)
         user_embeds, recipe_embeds = self.extract_embeddings(algo, trainset)
@@ -147,8 +168,10 @@ class Train:
         }
 
         print("\n--- Saving all artifacts to Google Cloud Storage ---")
-        self.save_to_gcs("user_embeddings.json", internal_user_embeddings)
+        self.save_user_embeddings_individually(internal_user_embeddings)
+
         self.save_to_gcs("recipe_embeddings.json", recipe_embeddings_serializable)
+
         print("--- Pipeline Complete ---")
 
 
