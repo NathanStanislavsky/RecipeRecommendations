@@ -1,2 +1,3 @@
 venv/
 .env
+/gcs-credentials.json
